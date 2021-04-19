@@ -20,6 +20,7 @@ HELP_TEXT = '\n'.join([
     "$note_name 'USERNAME' 'NOTE' - Update user note by username",
 ])
 
+bot = ()
 
 class User:
     def __init__(self, member):
@@ -33,7 +34,8 @@ class UserCommands:
     GUILD = ''
     PATH = ''
     @staticmethod
-    def initialize(guild, path):
+    def initialize(ref_bot, guild, path):
+        bot = ref_bot
         UserCommands.GUILD = guild
         UserCommands.PATH = path
 
@@ -61,7 +63,7 @@ class UserCommands:
 
         if not os.path.exists(UserCommands.PATH):
             UserCommands.write_users_to_file(tmp)
-            
+
         return tmp
 
     @staticmethod
