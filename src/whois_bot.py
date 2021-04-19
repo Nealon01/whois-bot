@@ -6,10 +6,6 @@ import pickle
 import discord
 from discord.ext import commands
 
-from dotenv import load_dotenv
-
-load_dotenv()
-
 HELP_COMMAND_RE = re.compile(r'^\s*\$help\s*$')
 LIST_COMMAND_RE = re.compile(r'^\s*\$list\s*$')
 USER_COMMAND_RE = re.compile(r'^\s*\$user\s.*$')
@@ -23,11 +19,6 @@ HELP_TEXT = '\n'.join([
     "$note 'NICKNAME' 'NOTE' - Update user note by nickname",
     "$note_name 'USERNAME' 'NOTE' - Update user note by username",
 ])
-
-intents = discord.Intents.default()
-intents.members = True
-
-bot = commands.Bot(command_prefix='$', intents=intents)
 
 
 class User:
@@ -68,6 +59,9 @@ class UserCommands:
             if any(x.name == "OneOfUs" for x in member.roles):
                 tmp[member.name] = User(member)
 
+        if not os.path.exists(UserCommands.PATH):
+            UserCommands.write_users_to_file(tmp)
+            
         return tmp
 
     @staticmethod
@@ -139,23 +133,31 @@ async def on_member_update(before, after):
     """Called when a member has been updates (nickname change)"""
     name = after.name if after.name is not None else ''
     nick = after.nick if after.nick is not None else ''
-
     users = UserCommands.load_users_from_file()
-    if after.name in users and any(x.name == "OneOfUs" for x in after.roles):
-        UserCommands.log("User '" + name + "' updated nickname to '" + nick + "'")
-        users[after.name].nickname = after.nick
-        UserCommands.write_users_to_file(users)
-    elif any(x.name == "OneOfUs" for x in after.roles):
-        UserCommands.log("User '" + name + "' added to tracking")
-        users[after.name] = User(after)
+
+    # if user has tracked role
+    if any(x.name == "OneOfUs" for x in after.roles):
+        if after.name in users:
+            if after.nick == before.nick:
+                pass # unimportant change to already tracked user
+            else:
+                # new nickname on existing user
+                UserCommands.log("User '" + name + "' updated nickname to '" + nick + "'")
+                users[after.name].nickname = after.nick
+                UserCommands.write_users_to_file(users)
+        else:
+            # new user added
+            UserCommands.log("User '" + name + "' added to tracking")
+            users[after.name] = User(after)
+            UserCommands.write_users_to_file(users)
     else:
         if after.name in users:
+            # existing user removed
             del users[after.name]
             UserCommands.log("User '" + name + "' removed from tracking")
+            UserCommands.write_users_to_file(users)
         else:
-            UserCommands.log("Other Member Update")
-
-    UserCommands.write_users_to_file(users)
+            pass # change to untracked user.
 
 
 @bot.event
