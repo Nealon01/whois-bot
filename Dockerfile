@@ -1,20 +1,16 @@
 FROM python:3.9.1-slim-buster
 WORKDIR /app
 
-ENV DISCORD_BOT_TOKEN="" \
-    REDDIT_API_CLIENT_ID="" \
-    REDDIT_API_CLIENT_SECRET="" \
-    SUBREDDIT_SCRAPE_LIST="" \
-    MEME_DOWNLOAD_DIR="" \
-    PERSONAL_PICKS_PLAYLIST_URL="" \
-    PYTHONUNBUFFERED=1
+ENV DISCORD_TOKEN="" \
+    DISCORD_GUILD="" \
+    DICT_PATH=""
 
 COPY requirements.txt .
 RUN python -m pip install --no-cache-dir -U pip && \
     pip install --no-cache-dir -r requirements.txt && \
     rm requirements.txt
 
-RUN mkdir -p /memes/
+RUN mkdir -p /config/
 
 COPY src/*.py ./
 ENTRYPOINT ["python", "./run.py"]
