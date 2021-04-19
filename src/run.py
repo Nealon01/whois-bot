@@ -17,11 +17,11 @@ def main():
     dict_path = get_env_or_error(DICT_PATH)
 
     UserCommands.initialize(DISCORD_GUILD, DICT_PATH)
-	
-	intents = discord.Intents.default()
-	intents.members = True
 
-	bot = commands.Bot(command_prefix='$', intents=intents)
+    intents = discord.Intents.default()
+    intents.members = True
+
+    bot = commands.Bot(command_prefix='$', intents=intents)
     bot.run(discord_bot_token)
 
 
