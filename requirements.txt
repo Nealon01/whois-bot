@@ -1,4 +1,1 @@
 discord.py==1.6.0
-praw==7.1.4
-schedule==1.0.0
-youtube-dl==2021.3.25
