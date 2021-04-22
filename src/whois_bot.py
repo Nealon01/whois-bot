@@ -6,6 +6,10 @@ import pickle
 import discord
 from discord.ext import commands
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 HELP_COMMAND_RE = re.compile(r'^\s*\$help\s*$')
 LIST_COMMAND_RE = re.compile(r'^\s*\$list\s*$')
 USER_COMMAND_RE = re.compile(r'^\s*\$user\s.*$')
@@ -20,7 +24,11 @@ HELP_TEXT = '\n'.join([
     "$note_name 'USERNAME' 'NOTE' - Update user note by username",
 ])
 
-bot = ()
+intents = discord.Intents.default()
+intents.members = True
+
+bot = commands.Bot(command_prefix='$', intents=intents)
+
 
 class User:
     def __init__(self, member):
@@ -28,14 +36,17 @@ class User:
         self.nickname = member.nick
         self.note = ''
 
+    def __gt__(self, user2):
+        nick_1 = self.nickname if self.nickname is not None else self.username
+        nick_2 = user2.nickname if user2.nickname is not None else user2.username
+        return nick_1.lower() > nick_2.lower()
+
 
 class UserCommands:
-
     GUILD = ''
     PATH = ''
     @staticmethod
-    def initialize(ref_bot, guild, path):
-        bot = ref_bot
+    def initialize(guild, path):
         UserCommands.GUILD = guild
         UserCommands.PATH = path
 
@@ -101,11 +112,20 @@ class UserCommands:
 
     @staticmethod
     def create_nickname_list(users):
-        tmp = ''
+        tmp = '`'
+
+        tmp_users = []
+        max_len = 0
         for user in users.values():
             nick = user.nickname if user.nickname is not None else user.username
-            tmp += 'Nickname:\t' + nick + '\t- Note:\t' + user.note + '\n'
-        return tmp
+            tmp_users.append([nick, user.note])
+            if len(nick) > max_len:
+                max_len = len(nick) + 2
+
+        for user in sorted(tmp_users, key=lambda x: x[0]):
+            tmp += user[0].ljust(max_len) + '<-> ' + user[1] + '\n'
+
+        return tmp + '`'
 
     @staticmethod
     def create_user_record(users, username):
@@ -165,7 +185,6 @@ async def on_member_update(before, after):
 @bot.event
 async def on_message(message):
     """Called when a new message is sent in the Discord."""
-    UserCommands.log("MESSAGE")
     if message.author == bot.user:
         return
     if HELP_COMMAND_RE.match(message.content) is not None:
@@ -178,7 +197,7 @@ async def on_message(message):
     if USER_COMMAND_RE.match(message.content) is not None:
         UserCommands.log(f'Got user request from {message.author.name}')
         UserCommands.log(message.content)
-        args = re.findall('\'([^\']*)\'', message.content)
+        args = re.findall('"([^"]*)"', message.content)
         if len(args) != 1:
             await message.channel.send("Must be 1 arg - 'NICKNAME'")
             UserCommands.log("Misformatted request.")
@@ -190,10 +209,9 @@ async def on_message(message):
             else:
                 await message.channel.send("Cannot find username/nickname '" + args[0] + "'")
     elif NOTE_COMMAND_RE.match(message.content) is not None:
-        re.findall('"([^"]*)"', message.content)
         UserCommands.log(f'Got note request from {message.author.name}')
         UserCommands.log(message.content)
-        args = re.findall('\'([^\']*)\'', message.content)
+        args = re.findall('"([^"]*)"', message.content)
         if len(args) != 2:
             await message.channel.send("Must be 2 args")
             UserCommands.log("Misformatted request.")
@@ -210,10 +228,9 @@ async def on_message(message):
                 await message.channel.send("Cannot find username/nickname '" + args[0] + "'")
 
     elif NOTE_NAME_COMMAND_RE.match(message.content) is not None:
-        re.findall('"([^"]*)"', message.content)
         UserCommands.log(f'Got note request from {message.author.name}')
         UserCommands.log(message.content)
-        args = re.findall('\'([^\']*)\'', message.content)
+        args = re.findall('"([^"]*)"', message.content)
         if len(args) != 2:
             await message.channel.send("Must be 2 args")
         else:
@@ -221,3 +238,7 @@ async def on_message(message):
             UserCommands.log('Updating note for \'' + args[0] + '\' to \'' + args[1] + '\'')
             users[args[0]].note = args[1]
             UserCommands.write_users_to_file(users)
+
+
+UserCommands.initialize(os.getenv('DISCORD_GUILD'), os.getenv('DICT_PATH'))
+bot.run(os.getenv('DISCORD_TOKEN'))
