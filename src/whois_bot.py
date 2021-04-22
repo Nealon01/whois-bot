@@ -19,9 +19,9 @@ HELP_TEXT = '\n'.join([
     'Available commands:',
     '$help - Shows this list of commands',
     '$list - list all nicknames/notes',
-    "$user 'NICKNAME' - list specific user's nickname/note",
-    "$note 'NICKNAME' 'NOTE' - Update user note by nickname",
-    "$note_name 'USERNAME' 'NOTE' - Update user note by username",
+    '$user "{nickname/username}" - list specific user\'s nickname/note',
+    '$note "{nickname/username}" "{note}" - Update user note by nickname',
+    '$note_name "{username}" "{note}" - Update user note by username',
 ])
 
 intents = discord.Intents.default()
@@ -45,10 +45,12 @@ class User:
 class UserCommands:
     GUILD = ''
     PATH = ''
+    ROLE = ''
     @staticmethod
-    def initialize(guild, path):
+    def initialize(guild, path, role):
         UserCommands.GUILD = guild
         UserCommands.PATH = path
+        UserCommands.ROLE = role
 
     @staticmethod
     def load_users_from_file():
@@ -69,7 +71,7 @@ class UserCommands:
         guild = discord.utils.get(bot.guilds, name=UserCommands.GUILD)
         tmp = {}
         for member in guild.members:
-            if any(x.name == "OneOfUs" for x in member.roles):
+            if any(x.name == UserCommands.ROLE for x in member.roles):
                 tmp[member.name] = User(member)
 
         if not os.path.exists(UserCommands.PATH):
@@ -158,7 +160,7 @@ async def on_member_update(before, after):
     users = UserCommands.load_users_from_file()
 
     # if user has tracked role
-    if any(x.name == "OneOfUs" for x in after.roles):
+    if any(x.name == UserCommands.ROLE for x in after.roles):
         if after.name in users:
             if after.nick == before.nick:
                 pass # unimportant change to already tracked user
@@ -240,5 +242,5 @@ async def on_message(message):
             UserCommands.write_users_to_file(users)
 
 
-UserCommands.initialize(os.getenv('DISCORD_GUILD'), os.getenv('DICT_PATH'))
+UserCommands.initialize(os.getenv('DISCORD_GUILD'), os.getenv('DICT_PATH'), os.getenv('DISCORD_ROLE'))
 bot.run(os.getenv('DISCORD_TOKEN'))
