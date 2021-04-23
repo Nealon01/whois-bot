@@ -6,7 +6,7 @@ This repository contains source for WhoIS Bot, a Discord bot written in Python t
 
 ## Running the Bot
 
-The bot can be run in any Python environment ~, but this repository includes a Dockerfile to run the bot in a Docker container.
+The bot can be run in any Python environment, but this repository includes a Dockerfile to run the bot in a Docker container.
 
 The Docker image is publish on [DockerHub](https://hub.docker.com/r/nealon/whois-bot).
 
