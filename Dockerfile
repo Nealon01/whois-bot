@@ -3,6 +3,7 @@ WORKDIR /app
 
 ENV DISCORD_TOKEN="" \
     DISCORD_GUILD="" \
+    DISCORD_ROLE="" \
     DICT_PATH=""
 
 COPY requirements.txt .
@@ -13,4 +14,4 @@ RUN python -m pip install --no-cache-dir -U pip && \
 RUN mkdir -p /config/
 
 COPY src/*.py ./
-ENTRYPOINT ["python", "./run.py"]
+ENTRYPOINT ["python", "./whois_bot.py"]
