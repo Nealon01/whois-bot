@@ -115,17 +115,15 @@ class UserCommands:
     @staticmethod
     def create_nickname_list(users):
         tmp = '`'
-
-        tmp_users = []
         max_len = 0
         for user in users.values():
             nick = user.nickname if user.nickname is not None else user.username
-            tmp_users.append([nick, user.note])
             if len(nick) > max_len:
                 max_len = len(nick) + 2
 
-        for user in sorted(tmp_users, key=lambda x: x[0]):
-            tmp += user[0].ljust(max_len) + '<-> ' + user[1] + '\n'
+        for user in sorted(users.values()):
+            nick = user.nickname if user.nickname is not None else user.username
+            tmp += nick.ljust(max_len) + '<-> ' + user.note + '\n'
 
         return tmp + '`'
 
@@ -155,8 +153,6 @@ async def on_ready():
 @bot.event
 async def on_member_update(before, after):
     """Called when a member has been updates (nickname change)"""
-    name = after.name if after.name is not None else ''
-    nick = after.nick if after.nick is not None else ''
     users = UserCommands.load_users_from_file()
 
     # if user has tracked role
