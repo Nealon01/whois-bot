@@ -154,7 +154,7 @@ async def on_ready():
 async def on_member_update(before, after):
     """Called when a member has been updates (nickname change)"""
     users = UserCommands.load_users_from_file()
-
+    UserCommands.log("before: '" + before.name + "'. After: " + after.name)
     # if user has tracked role
     if any(x.name == UserCommands.ROLE for x in after.roles):
         if after.name in users:
@@ -162,19 +162,19 @@ async def on_member_update(before, after):
                 pass # unimportant change to already tracked user
             else:
                 # new nickname on existing user
-                UserCommands.log("User '" + name + "' updated nickname to '" + nick + "'")
+                UserCommands.log("User '" + before.name + "' updated nickname to '" + before.nick + "'")
                 users[after.name].nickname = after.nick
                 UserCommands.write_users_to_file(users)
         else:
             # new user added
-            UserCommands.log("User '" + name + "' added to tracking")
+            UserCommands.log("User '" + after.name + "' added to tracking")
             users[after.name] = User(after)
             UserCommands.write_users_to_file(users)
     else:
         if after.name in users:
             # existing user removed
             del users[after.name]
-            UserCommands.log("User '" + name + "' removed from tracking")
+            UserCommands.log("User '" + after.name + "' removed from tracking")
             UserCommands.write_users_to_file(users)
         else:
             pass # change to untracked user.
