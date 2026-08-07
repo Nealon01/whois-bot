@@ -1,4 +1,5 @@
-FROM python:3.9.1-slim-buster
+# 3.12 (not 3.9.1): discord.py 2.x hits a typing bug on 3.9.0/3.9.1
+FROM python:3.12-slim
 WORKDIR /app
 
 ENV DISCORD_TOKEN="" \
