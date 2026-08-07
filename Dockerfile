@@ -15,4 +15,5 @@ RUN python -m pip install --no-cache-dir -U pip && \
 RUN mkdir -p /config/
 
 COPY src/*.py ./
-ENTRYPOINT ["python", "./whois_bot.py"]
+# -u: unbuffered stdout so docker logs shows output immediately
+ENTRYPOINT ["python", "-u", "./whois_bot.py"]
