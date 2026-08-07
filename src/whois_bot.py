@@ -350,12 +350,14 @@ async def on_ready():
     await bot.change_presence(activity=activity)
     UserCommands.update_nicknames_from_server()
     try:
+        synced = await bot.tree.sync()
+        UserCommands.log(f"Synced {len(synced)} global slash command(s)")
         guild = discord.utils.get(bot.guilds, name=UserCommands.GUILD)
         if guild is not None:
-            synced = await bot.tree.sync(guild=guild)
-        else:
-            synced = await bot.tree.sync()
-        UserCommands.log(f"Synced {len(synced)} slash command(s)")
+            # guild-scoped copy shows commands instantly (global can lag up to an hour)
+            bot.tree.copy_global_to(guild=guild)
+            synced_guild = await bot.tree.sync(guild=guild)
+            UserCommands.log(f"Synced {len(synced_guild)} slash command(s) for guild '{guild.name}'")
     except Exception as e:
         UserCommands.log('Failed to sync slash commands: ' + str(e))
 
