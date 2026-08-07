@@ -26,6 +26,7 @@ The bot requires the following environment variables to function. These are requ
 | DISCORD_GUILD           | The name of the discord server you want to monitor |
 | DISCORD_ROLE           | The name of the role to use for users to monitor (allows skipping bots/other) |
 | DICT_PATH           | The path to store the pickled dictionary for persistent notes. |
+| CONFIG_PATH           | *(optional)* Path to the JSON file with per-server settings (defaults to `guild_config.json` next to `DICT_PATH`). |
 
 ## Using the Bot
 
@@ -37,3 +38,17 @@ The following commands are available.
 | $list   | list all nicknames/notes                                          |
 | $user "{nickname/username}"  | Shows the record for a specific user.        |
 | $note "{nickname/username}" "{note}"   | Sets the note for the given user   |
+| $setchannel #channel   | *(admins)* Sets the channel where nickname changes are announced. |
+| $unsetchannel   | *(admins)* Disables nickname change announcements for this server. |
+
+## Nickname Change Announcements
+
+Whenever a tracked user (with `DISCORD_ROLE`) changes their nickname, the bot posts a message to the server's announcement channel, including a short reminder of the basic commands.
+
+Which channel receives announcements, in priority order:
+
+1. The channel set per-server with `$setchannel #channel` (requires *Manage Server* permission).
+2. A text channel literally named `voice-chat-sharing` (case-insensitive) — this gives you sensible default behavior with zero configuration.
+3. No channel → announcements stay disabled and the bot logs a hint to run `$setchannel`.
+
+Per-server settings live in the JSON file at `CONFIG_PATH` (defaults to `guild_config.json` next to `DICT_PATH`).
