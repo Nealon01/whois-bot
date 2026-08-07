@@ -28,6 +28,7 @@ class _FakeIntents:
 class _FakeBot:
     def __init__(self, *args, **kwargs):
         self.guilds = []
+        self.tree = _FakeTree()
     def change_presence(self, activity=None):
         pass
     def run(self, token):
@@ -37,6 +38,10 @@ class _FakeBot:
             return fn
         return decorator(coro) if coro else decorator
 
+class _FakeTree:
+    def command(self, *args, **kwargs):
+        return lambda f: f
+
 class _FakeActivity:
     def __init__(self, name=None, type=None):
         self.name = name
@@ -45,6 +50,11 @@ class _FakeActivity:
 discord.Intents = _FakeIntents
 discord.Activity = _FakeActivity
 discord.ActivityType = types.SimpleNamespace(watching='watching')
+discord.Interaction = type('Interaction', (), {})
+discord.TextChannel = type('TextChannel', (), {})
+discord.app_commands = types.ModuleType('discord.app_commands')
+discord.app_commands.describe = lambda **kw: (lambda f: f)
+discord.app_commands.guild_only = lambda *a, **k: (lambda f: f)
 discord.ext = discord_ext
 discord.ext.commands = discord_ext_commands
 discord_ext_commands.Bot = _FakeBot
@@ -73,7 +83,7 @@ print('build_nickname_update_text:')
 t = whois_bot.build_nickname_update_text('OldNick', 'NewNick', 'user1', '<@123>')
 check('changed: has mention', '<@123>' in t)
 check('changed: old -> new', '`OldNick` → `NewNick`' in t)
-check('changed: command reminder present', '$help' in t and '$note "nick" "note"' in t)
+check('changed: command reminder present', '/help' in t and '/note "nick" "note"' in t)
 check('changed: action text', 'changed their nickname' in t)
 
 t = whois_bot.build_nickname_update_text(None, 'FreshNick', 'user1', '<@123>')
@@ -177,8 +187,8 @@ check('$setchannel bare matches', whois_bot.SET_CHANNEL_COMMAND_RE.match('$setch
 check('$setchannel captures name', whois_bot.SET_CHANNEL_COMMAND_RE.match('$setchannel voice-chat-sharing').group(1).strip() == 'voice-chat-sharing')
 check('$unsetchannel matches', whois_bot.UNSET_CHANNEL_COMMAND_RE.match('$unsetchannel') is not None)
 check('$setchannel does not catch $unsetchannel', whois_bot.UNSET_CHANNEL_COMMAND_RE.match('$setchannel x') is None)
-check('HELP_TEXT lists setchannel', '$setchannel' in whois_bot.HELP_TEXT)
-check('HELP_TEXT lists unsetchannel', '$unsetchannel' in whois_bot.HELP_TEXT)
+check('HELP_TEXT lists setchannel', '/setchannel' in whois_bot.HELP_TEXT)
+check('HELP_TEXT lists unsetchannel', '/unsetchannel' in whois_bot.HELP_TEXT)
 
 # --- on_member_update handler-level tests (regression for review findings C1/M1/M2/M4) ---
 print('on_member_update handler:')
@@ -240,7 +250,7 @@ users = run_member_update(
     FakeMember('carol', 'NewN', [role], handler_guild))
 check('announcement sent on nick change', len(alert_channel.sent) == 1)
 check('announcement contains new nickname', 'NewN' in alert_channel.sent[0][0])
-check('announcement contains command reminder', '$help' in alert_channel.sent[0][0])
+check('announcement contains command reminder', '/help' in alert_channel.sent[0][0])
 check('nick persisted', users['carol'].nickname == 'NewN')
 
 broken_guild = FakeGuild(998, 'Broken Server', [FakeBrokenChannel(7, 'voice-chat-sharing')])
@@ -321,6 +331,112 @@ check('chunking: lines intact (no mid-line split)',
       all('<-> ' in c and '\n<->' not in c.replace('\n`', '') for c in big_chunks))
 check('chunking: nickname lines show the username too',
       any('(user00)' in c for c in big_chunks))
+
+# --- slash command handlers (fake interaction) ---
+print('slash commands:')
+class FakePerms:
+    def __init__(self, admin):
+        self.manage_guild = admin
+        self.administrator = admin
+
+class FakeResponse:
+    def __init__(self):
+        self.sent = []
+    async def send_message(self, content=None, **kw):
+        self.sent.append(content)
+
+class FakeFollowup:
+    def __init__(self, resp):
+        self.resp = resp
+    async def send(self, content=None, **kw):
+        self.resp.sent.append(content)
+
+class FakeInteraction:
+    def __init__(self, guild, admin=True):
+        self.response = FakeResponse()
+        self.followup = FakeFollowup(self.response)
+        self.guild = guild
+        self.user = types.SimpleNamespace(guild_permissions=FakePerms(admin))
+
+slash_guild = FakeGuild(777, 'Slash Server', [])
+def run_slash(coro):
+    asyncio.run(coro)
+    return coro  # already run
+
+# /help
+it = FakeInteraction(slash_guild)
+run_slash(whois_bot.slash_help(it))
+check('slash help: replies', it.response.sent and '/list' in it.response.sent[0] and '$help' not in it.response.sent[0])
+
+# /list with users
+seed_slash = {'zeta': whois_bot.User(FakeMember('zeta', 'ZNick', [role], handler_guild)),
+              'alpha': whois_bot.User(FakeMember('alpha', 'ANick', [role], handler_guild))}
+whois_bot.UserCommands.write_users_to_file(seed_slash)
+it = FakeInteraction(slash_guild)
+run_slash(whois_bot.slash_list(it))
+check('slash list: replies with chunks', len(it.response.sent) >= 1)
+check('slash list: content under limit', all(len(c) <= 1900 for c in it.response.sent))
+check('slash list: both users present', any('ANick (alpha)' in c for c in it.response.sent) and any('ZNick (zeta)' in c for c in it.response.sent))
+
+# /list empty
+whois_bot.UserCommands.write_users_to_file({})
+it = FakeInteraction(slash_guild)
+run_slash(whois_bot.slash_list(it))
+check('slash list: empty message', it.response.sent == ['No users tracked yet.'])
+
+# /user found and not found
+whois_bot.UserCommands.write_users_to_file(seed_slash)
+it = FakeInteraction(slash_guild)
+run_slash(whois_bot.slash_user(it, 'ZNick'))
+check('slash user: found shows record', it.response.sent and 'Username:' in it.response.sent[0])
+it = FakeInteraction(slash_guild)
+run_slash(whois_bot.slash_user(it, 'nobody'))
+check('slash user: not found message', it.response.sent and 'Cannot find' in it.response.sent[0])
+
+# /note sets and persists
+it = FakeInteraction(slash_guild)
+run_slash(whois_bot.slash_note(it, 'ANick', 'Alice Example'))
+users_after = whois_bot.UserCommands.load_users_from_file()
+check('slash note: persisted', users_after['alpha'].note == 'Alice Example')
+check('slash note: confirmation', it.response.sent and 'Alice Example' in it.response.sent[0])
+
+# /note_name
+it = FakeInteraction(slash_guild)
+run_slash(whois_bot.slash_note_name(it, 'zeta', 'Zed Example'))
+users_after = whois_bot.UserCommands.load_users_from_file()
+check('slash note_name: persisted', users_after['zeta'].note == 'Zed Example')
+it = FakeInteraction(slash_guild)
+run_slash(whois_bot.slash_note_name(it, 'ghost', 'X'))
+check('slash note_name: unknown user message', it.response.sent and 'Cannot find' in it.response.sent[0])
+
+# /setchannel admin path
+cfg_path2 = os.path.join(tmpdir, 'slash_config.json')
+whois_bot.GuildConfig.initialize(cfg_path2)
+target_chan = FakeChannel(42, 'voice-chat-sharing')
+it = FakeInteraction(slash_guild, admin=True)
+run_slash(whois_bot.slash_setchannel(it, target_chan))
+check('slash setchannel: saves config', whois_bot.GuildConfig.load().get('777') == 42)
+check('slash setchannel: confirmation', it.response.sent and '✅' in it.response.sent[0])
+
+# /setchannel non-admin
+it = FakeInteraction(slash_guild, admin=False)
+run_slash(whois_bot.slash_setchannel(it, target_chan))
+check('slash setchannel: non-admin denied', it.response.sent and 'Manage Server' in it.response.sent[0])
+
+# /setchannel save failure reports honestly
+whois_bot.GuildConfig.initialize(os.path.join(tmpdir, 'no_such_dir', 'x.json'))
+it = FakeInteraction(slash_guild, admin=True)
+run_slash(whois_bot.slash_setchannel(it, target_chan))
+check('slash setchannel: save failure message', it.response.sent and '❌' in it.response.sent[0])
+whois_bot.GuildConfig.initialize(cfg_path2)
+
+# /unsetchannel
+it = FakeInteraction(slash_guild, admin=True)
+run_slash(whois_bot.slash_unsetchannel(it))
+check('slash unsetchannel: disabled + config cleared', whois_bot.GuildConfig.load() == {} and it.response.sent and 'disabled' in it.response.sent[0])
+it = FakeInteraction(slash_guild, admin=True)
+run_slash(whois_bot.slash_unsetchannel(it))
+check('slash unsetchannel: no-config message', it.response.sent and 'No alert channel' in it.response.sent[0])
 
 print(f'\n{passed} passed, {failed} failed')
 sys.exit(1 if failed else 0)

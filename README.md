@@ -30,16 +30,24 @@ The bot requires the following environment variables to function. These are requ
 
 ## Using the Bot
 
-The following commands are available.
+The bot supports native Discord slash commands (type `/` in Discord) and the
+original `$` prefix aliases. The following commands are available.
 
 | Command | Description                                                       |
 |---------|-------------------------------------------------------------------|
-| $help   | Shows a list of available commands                                |
-| $list   | list all nicknames/notes                                          |
-| $user "{nickname/username}"  | Shows the record for a specific user.        |
-| $note "{nickname/username}" "{note}"   | Sets the note for the given user   |
-| $setchannel #channel   | *(admins)* Sets the channel where nickname changes are announced. |
-| $unsetchannel   | *(admins)* Disables nickname change announcements for this server. |
+| /help   | Shows a list of available commands                                |
+| /list   | list all nicknames/notes                                          |
+| /user "{nickname/username}"  | Shows the record for a specific user.        |
+| /note "{nickname/username}" "{note}"   | Sets the note for the given user   |
+| /note_name "{username}" "{note}"   | Sets the note by username (no lookup)   |
+| /setchannel #channel   | *(admins)* Sets the channel where nickname changes are announced. |
+| /unsetchannel   | *(admins)* Disables nickname change announcements for this server. |
+
+`$` prefix equivalents (`$list`, `$note "nick" "note"`, …) continue to work.
+
+> **Note:** `$` prefix aliases require the **Message Content Intent** enabled
+> for the bot in the Discord developer portal (Applications → Bot → Privileged
+> Gateway Intents). Slash commands work without it.
 
 ## Nickname Change Announcements
 

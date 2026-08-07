@@ -5,6 +5,7 @@ import re
 import pickle
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 from dotenv import load_dotenv
@@ -19,22 +20,23 @@ NOTE_NAME_COMMAND_RE = re.compile(r'^\s*\$note_name\s.*$')
 SET_CHANNEL_COMMAND_RE = re.compile(r'^\s*\$setchannel\b(.*)$', re.IGNORECASE)
 UNSET_CHANNEL_COMMAND_RE = re.compile(r'^\s*\$unsetchannel\b(.*)$', re.IGNORECASE)
 HELP_TEXT = '\n'.join([
-    'Available commands:',
-    '$help - Shows this list of commands',
-    '$list - list all nicknames/notes',
-    '$user "{nickname/username}" - list specific user\'s nickname/note',
-    '$note "{nickname/username}" "{note}" - Update user note by nickname',
-    '$note_name "{username}" "{note}" - Update user note by username',
-    '$setchannel #channel - Set the channel where nickname changes are announced (admins)',
-    '$unsetchannel - Disable nickname change announcements (admins)',
+    'Available commands (slash commands, or $ prefix aliases):',
+    '/help - Shows this list of commands',
+    '/list - list all nicknames/notes',
+    '/user "{nickname/username}" - list specific user\'s nickname/note',
+    '/note "{nickname/username}" "{note}" - Update user note by nickname',
+    '/note_name "{username}" "{note}" - Update user note by username',
+    '/setchannel #channel - Set the channel where nickname changes are announced (admins)',
+    '/unsetchannel - Disable nickname change announcements (admins)',
 ])
 # Shown as a footer on every nickname-change announcement.
-COMMAND_REMINDER = 'Commands: `$help` `$list` `$user "nick"` `$note "nick" "note"`'
+COMMAND_REMINDER = 'Commands: `/list` `/user "nick"` `/note "nick" "note"` — `/help` for all'
 # Default announcement channel name used when a server hasn't run $setchannel yet.
 DEFAULT_ALERT_CHANNEL = 'voice-chat-sharing'
 
 intents = discord.Intents.default()
 intents.members = True
+intents.message_content = True
 
 bot = commands.Bot(command_prefix='$', intents=intents)
 
@@ -248,6 +250,96 @@ class GuildConfig:
         return None
 
 
+# --- Slash commands (primary interface; $ prefix aliases still work) ---
+
+@bot.tree.command(name='help', description='Shows this list of commands')
+async def slash_help(interaction: discord.Interaction):
+    await interaction.response.send_message(HELP_TEXT)
+
+
+@bot.tree.command(name='list', description='List all nicknames/notes')
+async def slash_list(interaction: discord.Interaction):
+    users = UserCommands.load_users_from_file()
+    if not users:
+        await interaction.response.send_message('No users tracked yet.')
+        return
+    chunks = UserCommands.create_nickname_list(users)
+    await interaction.response.send_message(chunks[0])
+    for chunk in chunks[1:]:
+        await interaction.followup.send(chunk)
+
+
+@bot.tree.command(name='user', description="Shows the record for a specific user")
+@app_commands.describe(nickname='Nickname or username')
+async def slash_user(interaction: discord.Interaction, nickname: str):
+    users = UserCommands.load_users_from_file()
+    username = UserCommands.get_username_from_nickname(users, nickname)
+    if username != '':
+        await interaction.response.send_message(UserCommands.create_user_record(users, username))
+    else:
+        await interaction.response.send_message("Cannot find username/nickname '" + nickname + "'")
+
+
+@bot.tree.command(name='note', description='Update user note by nickname')
+@app_commands.describe(nickname='Nickname or username', note='The note to save')
+async def slash_note(interaction: discord.Interaction, nickname: str, note: str):
+    users = UserCommands.load_users_from_file()
+    username = UserCommands.get_username_from_nickname(users, nickname)
+    if username != '':
+        UserCommands.log('Updating note for \'' + nickname + '\' to \'' + note + '\'')
+        users[username].note = note
+        UserCommands.write_users_to_file(users)
+        await interaction.response.send_message(UserCommands.create_user_record(users, username))
+    else:
+        await interaction.response.send_message("Cannot find username/nickname '" + nickname + "'")
+
+
+@bot.tree.command(name='note_name', description='Update user note by username')
+@app_commands.describe(username='Discord username', note='The note to save')
+async def slash_note_name(interaction: discord.Interaction, username: str, note: str):
+    users = UserCommands.load_users_from_file()
+    if username in users:
+        UserCommands.log('Updating note for \'' + username + '\' to \'' + note + '\'')
+        users[username].note = note
+        UserCommands.write_users_to_file(users)
+        await interaction.response.send_message(UserCommands.create_user_record(users, username))
+    else:
+        await interaction.response.send_message("Cannot find username '" + username + "'")
+
+
+@bot.tree.command(name='setchannel', description='Set the channel where nickname changes are announced')
+@app_commands.describe(channel='Text channel for announcements')
+@app_commands.guild_only()
+async def slash_setchannel(interaction: discord.Interaction, channel: discord.TextChannel):
+    if not (interaction.user.guild_permissions.manage_guild
+            or interaction.user.guild_permissions.administrator):
+        await interaction.response.send_message("You need 'Manage Server' permission to change the alert channel.")
+        return
+    config = GuildConfig.load()
+    config[str(interaction.guild.id)] = channel.id
+    if GuildConfig.save(config):
+        await interaction.response.send_message('✅ Nickname change alerts will be posted to #' + channel.name)
+    else:
+        await interaction.response.send_message("❌ Couldn't save the config file — alert channel NOT changed.")
+
+
+@bot.tree.command(name='unsetchannel', description='Disable nickname change announcements')
+@app_commands.guild_only()
+async def slash_unsetchannel(interaction: discord.Interaction):
+    if not (interaction.user.guild_permissions.manage_guild
+            or interaction.user.guild_permissions.administrator):
+        await interaction.response.send_message("You need 'Manage Server' permission to change the alert channel.")
+        return
+    config = GuildConfig.load()
+    if config.pop(str(interaction.guild.id), None) is not None:
+        if GuildConfig.save(config):
+            await interaction.response.send_message('Nickname change alerts disabled for this server.')
+        else:
+            await interaction.response.send_message("❌ Couldn't save the config file — alerts NOT disabled.")
+    else:
+        await interaction.response.send_message('No alert channel was configured for this server.')
+
+
 @bot.event
 async def on_ready():
     """Called when the bot is first readied."""
@@ -257,6 +349,15 @@ async def on_ready():
         type=discord.ActivityType.watching)
     await bot.change_presence(activity=activity)
     UserCommands.update_nicknames_from_server()
+    try:
+        guild = discord.utils.get(bot.guilds, name=UserCommands.GUILD)
+        if guild is not None:
+            synced = await bot.tree.sync(guild=guild)
+        else:
+            synced = await bot.tree.sync()
+        UserCommands.log(f"Synced {len(synced)} slash command(s)")
+    except Exception as e:
+        UserCommands.log('Failed to sync slash commands: ' + str(e))
 
 
 @bot.event
