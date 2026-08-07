@@ -78,21 +78,41 @@ class UserCommands:
         UserCommands.log('Users Updated: ' + UserCommands.PATH)
 
     @staticmethod
-    def load_users_from_server():
+    async def load_users_from_server_api():
+        """Builds the tracked-user dict from the REST API (authoritative).
+
+        The gateway member cache can be stale/incomplete on startup, which
+        made nickname syncs drift; the REST member list is always current.
+        """
         guild = discord.utils.get(bot.guilds, name=UserCommands.GUILD)
+        if guild is None:
+            UserCommands.log("Guild '" + str(UserCommands.GUILD) + "' not found for server sync")
+            return {}
+        role_ids = {r.name: r.id for r in guild.roles}
+        role_id = role_ids.get(UserCommands.ROLE)
+
+        members = []
+        after = None
+        while True:
+            batch = await bot.http.get_members(guild.id, limit=1000, after=after)
+            members.extend(batch)
+            if len(batch) < 1000:
+                break
+            after = batch[-1]['user']['id']
+
         tmp = {}
-        for member in guild.members:
-            if any(x.name == UserCommands.ROLE for x in member.roles):
-                tmp[member.name] = User(member)
-
-        if not os.path.exists(UserCommands.PATH):
-            UserCommands.write_users_to_file(tmp)
-
+        for m in members:
+            if role_id is None or role_id in m.get('roles', []):
+                u = User.__new__(User)
+                u.username = m['user']['username']
+                u.nickname = m.get('nick')
+                u.note = ''
+                tmp[u.username] = u
         return tmp
 
     @staticmethod
-    def update_nicknames_from_server():
-        server_users = UserCommands.load_users_from_server()
+    async def update_nicknames_from_server():
+        server_users = await UserCommands.load_users_from_server_api()
         file_users = UserCommands.load_users_from_file()
 
         for user in server_users.values():
@@ -165,6 +185,39 @@ class UserCommands:
                 current = candidate
         chunks.append(current + '`')
         return chunks
+
+    @staticmethod
+    def create_nickname_embeds(users):
+        """Builds the roster as Discord embeds (mobile-friendly).
+
+        Returns a list of Embeds; each description stays under the 4096-char
+        limit. Lines: **nickname** — note · @username
+        """
+        lines = []
+        for user in sorted(users.values()):
+            if user.nickname is not None:
+                if user.note:
+                    lines.append(f"**{user.nickname}** — {user.note} · @{user.username}")
+                else:
+                    lines.append(f"**{user.nickname}** · @{user.username}")
+            else:
+                lines.append(f"**{user.username}** — {user.note}" if user.note else f"**{user.username}**")
+
+        embeds = []
+        current = []
+        current_len = 0
+        title = f"Who's Who — {len(users)} tracked"
+        for line in lines:
+            if current and current_len + len(line) + 1 > 4000:
+                embeds.append(discord.Embed(title=title, description='\n'.join(current)))
+                current = [line]
+                current_len = len(line)
+            else:
+                current.append(line)
+                current_len += len(line) + 1
+        if current:
+            embeds.append(discord.Embed(title=title, description='\n'.join(current)))
+        return embeds
 
     @staticmethod
     def create_user_record(users, username):
@@ -264,10 +317,10 @@ async def slash_list(interaction: discord.Interaction):
     if not users:
         await interaction.response.send_message('No users tracked yet.')
         return
-    chunks = UserCommands.create_nickname_list(users)
-    await interaction.response.send_message(chunks[0])
-    for chunk in chunks[1:]:
-        await interaction.followup.send(chunk)
+    embeds = UserCommands.create_nickname_embeds(users)
+    await interaction.response.send_message(embed=embeds[0])
+    for embed in embeds[1:]:
+        await interaction.followup.send(embed=embed)
 
 
 @bot.tree.command(name='user', description="Shows the record for a specific user")
@@ -349,7 +402,7 @@ async def on_ready():
         name='you',
         type=discord.ActivityType.watching)
     await bot.change_presence(activity=activity)
-    UserCommands.update_nicknames_from_server()
+    await UserCommands.update_nicknames_from_server()
     try:
         guild = discord.utils.get(bot.guilds, name=UserCommands.GUILD)
         if guild is not None:
@@ -442,8 +495,12 @@ async def on_message(message):
         await message.channel.send(HELP_TEXT)
     if LIST_COMMAND_RE.match(message.content) is not None:
         UserCommands.log(f'Got list request from {message.author.name}')
-        for chunk in UserCommands.create_nickname_list(UserCommands.load_users_from_file()):
-            await message.channel.send(chunk)
+        users = UserCommands.load_users_from_file()
+        if not users:
+            await message.channel.send('No users tracked yet.')
+        else:
+            for embed in UserCommands.create_nickname_embeds(users):
+                await message.channel.send(embed=embed)
     if USER_COMMAND_RE.match(message.content) is not None:
         UserCommands.log(f'Got user request from {message.author.name}')
         UserCommands.log(message.content)

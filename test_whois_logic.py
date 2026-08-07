@@ -56,6 +56,14 @@ discord.Activity = _FakeActivity
 discord.ActivityType = types.SimpleNamespace(watching='watching')
 discord.Interaction = type('Interaction', (), {})
 discord.TextChannel = type('TextChannel', (), {})
+
+class _FakeEmbed:
+    def __init__(self, **kw):
+        self.title = kw.get('title')
+        self.description = kw.get('description')
+        self.color = kw.get('color')
+
+discord.Embed = _FakeEmbed
 discord.app_commands = types.ModuleType('discord.app_commands')
 discord.app_commands.describe = lambda **kw: (lambda f: f)
 discord.app_commands.guild_only = lambda *a, **k: (lambda f: f)
@@ -279,15 +287,14 @@ check('untracked nick change: no record added', 'frank' not in users)
 
 # --- update_nicknames_from_server auto-prune (startup sync) ---
 print('update_nicknames_from_server prune:')
-_orig_load_server = whois_bot.UserCommands.load_users_from_server
 
-def _fake_server(users_dict):
-    def _loader():
+def _fake_server_api(users_dict):
+    async def _loader():
         return dict(users_dict)
-    return staticmethod(_loader)
+    return _loader
 
 # stale record pruned, current nick updated, notes preserved
-whois_bot.UserCommands.load_users_from_server = _fake_server({
+whois_bot.UserCommands.load_users_from_server_api = _fake_server_api({
     'alice': whois_bot.User(FakeMember('alice', 'NewNick', [role], handler_guild)),
     'bob': whois_bot.User(FakeMember('bob', None, [role], handler_guild))})
 seed = {
@@ -296,20 +303,18 @@ seed = {
     'carol': whois_bot.User(FakeMember('carol', None, [role], handler_guild))}
 seed['bob'].note = 'BOB KEEPS NOTE'
 whois_bot.UserCommands.write_users_to_file(seed)
-whois_bot.UserCommands.update_nicknames_from_server()
+asyncio.run(whois_bot.UserCommands.update_nicknames_from_server())
 pruned = whois_bot.UserCommands.load_users_from_file()
 check('prune: stale carol removed', 'carol' not in pruned)
 check('prune: alice nick updated', pruned['alice'].nickname == 'NewNick')
 check('prune: bob note preserved', pruned['bob'].note == 'BOB KEEPS NOTE')
 
 # empty server lookup does NOT wipe the store
-whois_bot.UserCommands.load_users_from_server = _fake_server({})
+whois_bot.UserCommands.load_users_from_server_api = _fake_server_api({})
 whois_bot.UserCommands.write_users_to_file(seed)
-whois_bot.UserCommands.update_nicknames_from_server()
+asyncio.run(whois_bot.UserCommands.update_nicknames_from_server())
 kept = whois_bot.UserCommands.load_users_from_file()
 check('prune: empty server lookup preserves store', len(kept) == 3)
-
-whois_bot.UserCommands.load_users_from_server = _orig_load_server
 
 # --- create_nickname_list chunking (Discord 2000-char message limit) ---
 print('create_nickname_list chunking:')
@@ -336,6 +341,23 @@ check('chunking: lines intact (no mid-line split)',
 check('chunking: nickname lines show the username too',
       any('(user00)' in c for c in big_chunks))
 
+# --- create_nickname_embeds (roster as Discord embeds) ---
+print('create_nickname_embeds:')
+embeds = whois_bot.UserCommands.create_nickname_embeds(small)
+check('embeds: one embed for small list', len(embeds) == 1)
+_desc = embeds[0].description
+check('embeds: bold nickname', '**beta**' in _desc)
+check('embeds: @username', '@beta' in _desc)
+check('embeds: has title', 'Who' in embeds[0].title)
+check('embeds: note present', 'long real name' in _desc)
+check('embeds: no parens around username', '(beta)' not in _desc)
+
+big_embeds = whois_bot.UserCommands.create_nickname_embeds(big)
+check('embeds: big list splits', len(big_embeds) > 1)
+check('embeds: descriptions under 4096', all(len(e.description) <= 4000 for e in big_embeds))
+check('embeds: every user present once',
+      sum(e.description.count('**') // 2 for e in big_embeds) == len(big))
+
 # --- slash command handlers (fake interaction) ---
 print('slash commands:')
 class FakePerms:
@@ -346,14 +368,21 @@ class FakePerms:
 class FakeResponse:
     def __init__(self):
         self.sent = []
-    async def send_message(self, content=None, **kw):
-        self.sent.append(content)
+        self.sent_embeds = []
+    async def send_message(self, content=None, embed=None, **kw):
+        if embed is not None:
+            self.sent_embeds.append(embed)
+        if content is not None:
+            self.sent.append(content)
 
 class FakeFollowup:
     def __init__(self, resp):
         self.resp = resp
-    async def send(self, content=None, **kw):
-        self.resp.sent.append(content)
+    async def send(self, content=None, embed=None, **kw):
+        if embed is not None:
+            self.resp.sent_embeds.append(embed)
+        if content is not None:
+            self.resp.sent.append(content)
 
 class FakeInteraction:
     def __init__(self, guild, admin=True):
@@ -372,15 +401,17 @@ it = FakeInteraction(slash_guild)
 run_slash(whois_bot.slash_help(it))
 check('slash help: replies', it.response.sent and '/list' in it.response.sent[0] and '$help' not in it.response.sent[0])
 
-# /list with users
+# /list with users (embed format)
 seed_slash = {'zeta': whois_bot.User(FakeMember('zeta', 'ZNick', [role], handler_guild)),
               'alpha': whois_bot.User(FakeMember('alpha', 'ANick', [role], handler_guild))}
 whois_bot.UserCommands.write_users_to_file(seed_slash)
 it = FakeInteraction(slash_guild)
 run_slash(whois_bot.slash_list(it))
-check('slash list: replies with chunks', len(it.response.sent) >= 1)
-check('slash list: content under limit', all(len(c) <= 1900 for c in it.response.sent))
-check('slash list: both users present', any('ANick (alpha)' in c for c in it.response.sent) and any('ZNick (zeta)' in c for c in it.response.sent))
+check('slash list: replies with embed', len(it.response.sent_embeds) == 1)
+_slash_desc = it.response.sent_embeds[0].description
+check('slash list: embed has both users', '**ANick**' in _slash_desc and '**ZNick**' in _slash_desc)
+check('slash list: usernames via @', '@alpha' in _slash_desc and '@zeta' in _slash_desc)
+check('slash list: no parens around usernames', 'ANick (alpha)' not in _slash_desc and 'ZNick (zeta)' not in _slash_desc)
 
 # /list empty
 whois_bot.UserCommands.write_users_to_file({})
