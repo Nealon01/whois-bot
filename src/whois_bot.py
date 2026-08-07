@@ -259,6 +259,7 @@ async def slash_help(interaction: discord.Interaction):
 
 @bot.tree.command(name='list', description='List all nicknames/notes')
 async def slash_list(interaction: discord.Interaction):
+    UserCommands.log(f'Got list request from {interaction.user.name}')
     users = UserCommands.load_users_from_file()
     if not users:
         await interaction.response.send_message('No users tracked yet.')
@@ -350,16 +351,34 @@ async def on_ready():
     await bot.change_presence(activity=activity)
     UserCommands.update_nicknames_from_server()
     try:
-        synced = await bot.tree.sync()
-        UserCommands.log(f"Synced {len(synced)} global slash command(s)")
         guild = discord.utils.get(bot.guilds, name=UserCommands.GUILD)
         if guild is not None:
-            # guild-scoped copy shows commands instantly (global can lag up to an hour)
+            # guild-scoped only: shows instantly and avoids the duplicate
+            # global+guild entries that confuse Discord clients
             bot.tree.copy_global_to(guild=guild)
             synced_guild = await bot.tree.sync(guild=guild)
             UserCommands.log(f"Synced {len(synced_guild)} slash command(s) for guild '{guild.name}'")
+            # remove any previously-synced global commands (they show as duplicates)
+            await bot.tree._http.bulk_upsert_global_commands(bot.application_id, payload=[])
+            UserCommands.log('Cleared global command scope (guild-scoped only)')
+        else:
+            synced = await bot.tree.sync()
+            UserCommands.log(f"Synced {len(synced)} global slash command(s)")
     except Exception as e:
         UserCommands.log('Failed to sync slash commands: ' + str(e))
+
+
+@bot.tree.error
+async def on_tree_error(interaction: discord.Interaction, error: Exception):
+    """Makes interaction failures visible in the bot logs instead of silent."""
+    UserCommands.log(f"Slash command error from {getattr(interaction.user, 'name', '?')}: {error}")
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send('Something went wrong — the error has been logged.')
+        else:
+            await interaction.response.send_message('Something went wrong — the error has been logged.')
+    except Exception:
+        pass
 
 
 @bot.event

@@ -41,6 +41,10 @@ class _FakeBot:
 class _FakeTree:
     def command(self, *args, **kwargs):
         return lambda f: f
+    def error(self, f=None):
+        if f is None:
+            return lambda fn: fn
+        return f
 
 class _FakeActivity:
     def __init__(self, name=None, type=None):
@@ -356,7 +360,7 @@ class FakeInteraction:
         self.response = FakeResponse()
         self.followup = FakeFollowup(self.response)
         self.guild = guild
-        self.user = types.SimpleNamespace(guild_permissions=FakePerms(admin))
+        self.user = types.SimpleNamespace(guild_permissions=FakePerms(admin), name='tester')
 
 slash_guild = FakeGuild(777, 'Slash Server', [])
 def run_slash(coro):
