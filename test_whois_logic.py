@@ -108,6 +108,14 @@ class FakeChannel:
         self.id = cid
         self.name = name
         self.type = 'text'
+    def send(self, *a, **k):
+        return None
+
+class FakeVoiceChannel:
+    def __init__(self, cid, name):
+        self.id = cid
+        self.name = name
+        self.type = 'voice'
 
 class FakeGuild:
     def __init__(self, gid, name, channels):
@@ -141,6 +149,13 @@ check('configured channel wins', whois_bot.GuildConfig.get_announcement_channel(
 whois_bot.GuildConfig.save({'42': 999})
 check('stale configured channel falls back to voice-chat-sharing',
       whois_bot.GuildConfig.get_announcement_channel(guild) is voice)
+
+# configured channel is a voice channel (no .send) -> falls back
+voice_chan = FakeVoiceChannel(3, 'voice-chat')
+guild3 = FakeGuild(44, 'Voice Guild', [general, voice, voice_chan])
+whois_bot.GuildConfig.save({'44': 3})
+check('configured voice channel falls back to text channel',
+      whois_bot.GuildConfig.get_announcement_channel(guild3) is voice)
 
 # --- regexes ---
 print('command regexes:')

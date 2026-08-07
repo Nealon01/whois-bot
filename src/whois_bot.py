@@ -204,9 +204,9 @@ class GuildConfig:
         channel_id = config.get(str(guild.id))
         if channel_id:
             channel = guild.get_channel(channel_id)
-            if channel is not None:
+            if channel is not None and hasattr(channel, 'send'):
                 return channel
-            UserCommands.log(f"Configured channel {channel_id} not found in guild '{guild.name}', falling back.")
+            UserCommands.log(f"Configured channel {channel_id} not found/usable in guild '{guild.name}', falling back.")
         for channel in guild.text_channels:
             if channel.name.lower() == DEFAULT_ALERT_CHANNEL.lower():
                 UserCommands.log(f"Auto-detected '{DEFAULT_ALERT_CHANNEL}' for guild '{guild.name}' (run $setchannel to change it).")
@@ -329,6 +329,8 @@ async def on_message(message):
 
     elif SET_CHANNEL_COMMAND_RE.match(message.content) is not None:
         UserCommands.log(f'Got setchannel request from {message.author.name}')
+        if message.guild is None:
+            return  # DM — nothing to configure
         if not (message.author.guild_permissions.manage_guild
                 or message.author.guild_permissions.administrator):
             await message.channel.send("You need 'Manage Server' permission to change the alert channel.")
@@ -347,7 +349,7 @@ async def on_message(message):
                         if c.name.lower() == target.lower():
                             channel = c
                             break
-                if channel is None:
+                if channel is None or not hasattr(channel, 'send'):
                     await message.channel.send("Couldn't find a text channel named '" + target + "'")
                 else:
                     config = GuildConfig.load()
@@ -356,6 +358,8 @@ async def on_message(message):
                     await message.channel.send('✅ Nickname change alerts will be posted to #' + channel.name)
     elif UNSET_CHANNEL_COMMAND_RE.match(message.content) is not None:
         UserCommands.log(f'Got unsetchannel request from {message.author.name}')
+        if message.guild is None:
+            return  # DM — nothing to configure
         if not (message.author.guild_permissions.manage_guild
                 or message.author.guild_permissions.administrator):
             await message.channel.send("You need 'Manage Server' permission to change the alert channel.")
