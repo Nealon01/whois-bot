@@ -99,6 +99,15 @@ class UserCommands:
             else:
                 file_users[user.username] = user
 
+        # prune records for users no longer in the tracked role/server.
+        # Guarded: if the server lookup came back empty (transient failure),
+        # don't wipe the store.
+        if server_users:
+            stale = [k for k in file_users if k not in server_users]
+            for k in stale:
+                UserCommands.log("User '" + k + "' removed from tracking (no longer in role)")
+                del file_users[k]
+
         f = open(UserCommands.PATH, 'wb')
         pickle.dump(file_users, f)
         f.close()

@@ -263,5 +263,39 @@ users = run_member_update(
 check('untracked nick change: no announcement', alert_channel.sent == [])
 check('untracked nick change: no record added', 'frank' not in users)
 
+# --- update_nicknames_from_server auto-prune (startup sync) ---
+print('update_nicknames_from_server prune:')
+_orig_load_server = whois_bot.UserCommands.load_users_from_server
+
+def _fake_server(users_dict):
+    def _loader():
+        return dict(users_dict)
+    return staticmethod(_loader)
+
+# stale record pruned, current nick updated, notes preserved
+whois_bot.UserCommands.load_users_from_server = _fake_server({
+    'alice': whois_bot.User(FakeMember('alice', 'NewNick', [role], handler_guild)),
+    'bob': whois_bot.User(FakeMember('bob', None, [role], handler_guild))})
+seed = {
+    'alice': whois_bot.User(FakeMember('alice', 'OldNick', [role], handler_guild)),
+    'bob': whois_bot.User(FakeMember('bob', None, [role], handler_guild)),
+    'carol': whois_bot.User(FakeMember('carol', None, [role], handler_guild))}
+seed['bob'].note = 'BOB KEEPS NOTE'
+whois_bot.UserCommands.write_users_to_file(seed)
+whois_bot.UserCommands.update_nicknames_from_server()
+pruned = whois_bot.UserCommands.load_users_from_file()
+check('prune: stale carol removed', 'carol' not in pruned)
+check('prune: alice nick updated', pruned['alice'].nickname == 'NewNick')
+check('prune: bob note preserved', pruned['bob'].note == 'BOB KEEPS NOTE')
+
+# empty server lookup does NOT wipe the store
+whois_bot.UserCommands.load_users_from_server = _fake_server({})
+whois_bot.UserCommands.write_users_to_file(seed)
+whois_bot.UserCommands.update_nicknames_from_server()
+kept = whois_bot.UserCommands.load_users_from_file()
+check('prune: empty server lookup preserves store', len(kept) == 3)
+
+whois_bot.UserCommands.load_users_from_server = _orig_load_server
+
 print(f'\n{passed} passed, {failed} failed')
 sys.exit(1 if failed else 0)
