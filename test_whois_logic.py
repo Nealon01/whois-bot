@@ -319,6 +319,8 @@ check('chunking: no user lost across chunks',
       sum(c.count('<-> ') for c in big_chunks) == len(big))
 check('chunking: lines intact (no mid-line split)',
       all('<-> ' in c and '\n<->' not in c.replace('\n`', '') for c in big_chunks))
+check('chunking: nickname lines show the username too',
+      any('(user00)' in c for c in big_chunks))
 
 print(f'\n{passed} passed, {failed} failed')
 sys.exit(1 if failed else 0)

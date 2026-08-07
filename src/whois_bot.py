@@ -138,15 +138,19 @@ class UserCommands:
         limit (chunked on line boundaries) so large rosters don't fail to send.
         """
         max_len = 0
+        displays = {}
         for user in users.values():
-            nick = user.nickname if user.nickname is not None else user.username
-            if len(nick) > max_len:
-                max_len = len(nick) + 2
+            if user.nickname is not None:
+                display = f"{user.nickname} ({user.username})"
+            else:
+                display = user.username
+            displays[id(user)] = display
+            if len(display) > max_len:
+                max_len = len(display) + 2
 
         lines = []
         for user in sorted(users.values()):
-            nick = user.nickname if user.nickname is not None else user.username
-            lines.append(nick.ljust(max_len) + '<-> ' + user.note)
+            lines.append(displays[id(user)].ljust(max_len) + '<-> ' + user.note)
 
         chunks = []
         current = '`'
@@ -163,8 +167,8 @@ class UserCommands:
     @staticmethod
     def create_user_record(users, username):
         user = users[username]
-        nick = user.nickname if user.nickname is not None else user.username
-        return 'Nickname:\t' + nick + '\t- Note:\t' + user.note + '\n'
+        nick = user.nickname if user.nickname is not None else '(none)'
+        return 'Username:\t' + user.username + '\nNickname:\t' + nick + '\nNote:\t' + user.note + '\n'
 
     @staticmethod
     def log(message):
