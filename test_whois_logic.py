@@ -143,6 +143,12 @@ guild = FakeGuild(42, 'Test Server', [general, voice])
 whois_bot.GuildConfig.initialize(os.path.join(tmpdir, 'empty.json'))
 check('fallback: voice-chat-sharing auto-detected', whois_bot.GuildConfig.get_announcement_channel(guild) is voice)
 
+# fallback also matches emoji-prefixed channel names (e.g. 🔊voice-chat-sharing)
+emoji_chan = FakeChannel(9, '🔊voice-chat-sharing')
+guild_emoji = FakeGuild(45, 'Emoji Server', [general, emoji_chan])
+check('fallback: emoji-prefixed channel auto-detected',
+      whois_bot.GuildConfig.get_announcement_channel(guild_emoji) is emoji_chan)
+
 # no voice-chat-sharing channel at all -> None
 guild2 = FakeGuild(43, 'Other Server', [general])
 check('no match -> None', whois_bot.GuildConfig.get_announcement_channel(guild2) is None)

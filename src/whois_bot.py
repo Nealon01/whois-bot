@@ -213,8 +213,8 @@ class GuildConfig:
                 return channel
             UserCommands.log(f"Configured channel {channel_id} not found/usable in guild '{guild.name}', falling back.")
         for channel in guild.text_channels:
-            if channel.name.lower() == DEFAULT_ALERT_CHANNEL.lower():
-                UserCommands.log(f"Auto-detected '{DEFAULT_ALERT_CHANNEL}' for guild '{guild.name}' (run $setchannel to change it).")
+            if DEFAULT_ALERT_CHANNEL in channel.name.lower():
+                UserCommands.log(f"Auto-detected '{channel.name}' for guild '{guild.name}' (run $setchannel to change it).")
                 return channel
         UserCommands.log(f"No announcement channel for guild '{guild.name}' — run $setchannel #channel to enable alerts.")
         return None
@@ -361,8 +361,14 @@ async def on_message(message):
                 if match:
                     channel = message.guild.get_channel(int(match.group(1)))
                 if channel is None:
+                    # exact name match first, then substring (handles emoji-prefixed names)
                     for c in message.guild.text_channels:
                         if c.name.lower() == target.lower():
+                            channel = c
+                            break
+                if channel is None:
+                    for c in message.guild.text_channels:
+                        if target.lower() in c.name.lower():
                             channel = c
                             break
                 if channel is None or not hasattr(channel, 'send'):
