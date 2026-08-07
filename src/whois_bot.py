@@ -17,7 +17,7 @@ USER_COMMAND_RE = re.compile(r'^\s*\$user\s.*$')
 NOTE_COMMAND_RE = re.compile(r'^\s*\$note\s.*$')
 NOTE_NAME_COMMAND_RE = re.compile(r'^\s*\$note_name\s.*$')
 SET_CHANNEL_COMMAND_RE = re.compile(r'^\s*\$setchannel\b(.*)$', re.IGNORECASE)
-UNSET_CHANNEL_COMMAND_RE = re.compile(r'^\s*\$unsetchannel\s*$', re.IGNORECASE)
+UNSET_CHANNEL_COMMAND_RE = re.compile(r'^\s*\$unsetchannel\b(.*)$', re.IGNORECASE)
 HELP_TEXT = '\n'.join([
     'Available commands:',
     '$help - Shows this list of commands',
@@ -187,11 +187,16 @@ class GuildConfig:
     @staticmethod
     def save(config):
         try:
-            with open(GuildConfig.CONFIG_PATH, 'w') as f:
+            # atomic-ish write: temp file + replace, so a crash can't corrupt the config
+            tmp_path = GuildConfig.CONFIG_PATH + '.tmp'
+            with open(tmp_path, 'w') as f:
                 json.dump(config, f, indent=2)
+            os.replace(tmp_path, GuildConfig.CONFIG_PATH)
             UserCommands.log('Config saved: ' + GuildConfig.CONFIG_PATH)
+            return True
         except OSError as e:
             UserCommands.log('Failed to write config ' + GuildConfig.CONFIG_PATH + ': ' + str(e))
+            return False
 
     @staticmethod
     def get_announcement_channel(guild):
@@ -235,8 +240,15 @@ async def on_member_update(before, after):
     if any(x.name == UserCommands.ROLE for x in after.roles):
         if before.name != after.name and before.name in users:
             # global username changed: migrate the stored record to the new key
-            users[after.name] = users.pop(before.name)
-            UserCommands.log("Username changed: '" + before.name + "' -> '" + after.name + "' (record migrated)")
+            if after.name in users:
+                # collision — another record already owns the new username; don't destroy it
+                UserCommands.log("Username change '" + before.name + "' -> '" + after.name
+                                 + "' collides with an existing record; keeping existing.")
+            else:
+                users[after.name] = users.pop(before.name)
+                users[after.name].username = after.name
+                UserCommands.log("Username changed: '" + before.name + "' -> '" + after.name + "' (record migrated)")
+                UserCommands.write_users_to_file(users)
 
         if after.name in users:
             if after.nick == before.nick:
@@ -249,8 +261,12 @@ async def on_member_update(before, after):
                 # announce the change to the server's configured channel
                 channel = GuildConfig.get_announcement_channel(after.guild)
                 if channel is not None:
-                    await channel.send(build_nickname_update_text(
-                        before.nick, after.nick, after.name, after.mention))
+                    try:
+                        await channel.send(build_nickname_update_text(
+                            before.nick, after.nick, after.name, after.mention))
+                    except Exception as e:
+                        # never let a send failure (Forbidden, HTTP, etc.) crash the handler
+                        UserCommands.log('Failed to announce nickname change: ' + str(e))
         else:
             # new user added
             UserCommands.log("User '" + after.name + "' added to tracking")
@@ -350,24 +366,32 @@ async def on_message(message):
                             channel = c
                             break
                 if channel is None or not hasattr(channel, 'send'):
-                    await message.channel.send("Couldn't find a text channel named '" + target + "'")
+                    await message.channel.send("Couldn't find a text channel named `" + target + "`")
                 else:
                     config = GuildConfig.load()
                     config[str(message.guild.id)] = channel.id
-                    GuildConfig.save(config)
-                    await message.channel.send('✅ Nickname change alerts will be posted to #' + channel.name)
+                    if GuildConfig.save(config):
+                        await message.channel.send('✅ Nickname change alerts will be posted to #' + channel.name)
+                    else:
+                        await message.channel.send("❌ Couldn't save the config file — alert channel NOT changed.")
     elif UNSET_CHANNEL_COMMAND_RE.match(message.content) is not None:
         UserCommands.log(f'Got unsetchannel request from {message.author.name}')
         if message.guild is None:
             return  # DM — nothing to configure
+        unset_channel_match = UNSET_CHANNEL_COMMAND_RE.match(message.content)
+        if unset_channel_match and unset_channel_match.group(1).strip():
+            await message.channel.send('Usage: `$unsetchannel` (takes no arguments)')
+            return
         if not (message.author.guild_permissions.manage_guild
                 or message.author.guild_permissions.administrator):
             await message.channel.send("You need 'Manage Server' permission to change the alert channel.")
         else:
             config = GuildConfig.load()
             if config.pop(str(message.guild.id), None) is not None:
-                GuildConfig.save(config)
-                await message.channel.send('Nickname change alerts disabled for this server.')
+                if GuildConfig.save(config):
+                    await message.channel.send('Nickname change alerts disabled for this server.')
+                else:
+                    await message.channel.send("❌ Couldn't save the config file — alerts NOT disabled.")
             else:
                 await message.channel.send('No alert channel was configured for this server.')
 

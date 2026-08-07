@@ -2,6 +2,7 @@
 
 Usage: python3 test_whois_logic.py
 """
+import asyncio
 import json
 import os
 import sys
@@ -108,8 +109,14 @@ class FakeChannel:
         self.id = cid
         self.name = name
         self.type = 'text'
-    def send(self, *a, **k):
+        self.sent = []
+    async def send(self, *a, **k):
+        self.sent.append(a)
         return None
+
+class FakeBrokenChannel(FakeChannel):
+    async def send(self, *a, **k):
+        raise RuntimeError('boom')
 
 class FakeVoiceChannel:
     def __init__(self, cid, name):
@@ -166,6 +173,89 @@ check('$unsetchannel matches', whois_bot.UNSET_CHANNEL_COMMAND_RE.match('$unsetc
 check('$setchannel does not catch $unsetchannel', whois_bot.UNSET_CHANNEL_COMMAND_RE.match('$setchannel x') is None)
 check('HELP_TEXT lists setchannel', '$setchannel' in whois_bot.HELP_TEXT)
 check('HELP_TEXT lists unsetchannel', '$unsetchannel' in whois_bot.HELP_TEXT)
+
+# --- on_member_update handler-level tests (regression for review findings C1/M1/M2/M4) ---
+print('on_member_update handler:')
+tracked_role = 'Tracked'
+whois_bot.UserCommands.ROLE = tracked_role
+users_path = os.path.join(tmpdir, 'users.pkl')
+whois_bot.UserCommands.PATH = users_path
+
+class FakeRole:
+    def __init__(self, name):
+        self.name = name
+
+class FakeMember:
+    def __init__(self, name, nick, roles, guild, mention=None):
+        self.name = name
+        self.nick = nick
+        self.roles = roles
+        self.guild = guild
+        self.mention = mention or f'<@{name}>'
+
+role = FakeRole(tracked_role)
+handler_guild = FakeGuild(999, 'Handler Server', [])
+alert_channel = FakeChannel(1, 'voice-chat-sharing')
+handler_guild.text_channels = [alert_channel]
+
+def run_member_update(before, after):
+    asyncio.run(whois_bot.on_member_update(before, after))
+    with open(users_path, 'rb') as f:
+        return whois_bot.pickle.load(f)
+
+# C1: username change WITHOUT nick change must persist the migration
+whois_bot.UserCommands.write_users_to_file({'alice': whois_bot.User(FakeMember('alice', 'AliceNick', [role], handler_guild))})
+users = run_member_update(
+    FakeMember('alice', 'AliceNick', [role], handler_guild),
+    FakeMember('alice_new', 'AliceNick', [role], handler_guild))
+check('C1: migration persisted on username change', 'alice_new' in users and 'alice' not in users)
+check('M1: migrated record username updated', users['alice_new'].username == 'alice_new')
+check('C1: note preserved through migration', users['alice_new'].note == '')
+check('C1: no announcement sent for nick-unchanged event', alert_channel.sent == [])
+
+# M4: username collision must NOT destroy the existing record
+whois_bot.UserCommands.write_users_to_file({
+    'alice': whois_bot.User(FakeMember('alice', None, [role], handler_guild)),
+    'bob': whois_bot.User(FakeMember('bob', None, [role], handler_guild))})
+m4_users = whois_bot.UserCommands.load_users_from_file()
+m4_users['bob'].note = 'BOB NOTE'
+whois_bot.UserCommands.write_users_to_file(m4_users)
+users = run_member_update(
+    FakeMember('alice', None, [role], handler_guild),
+    FakeMember('bob', None, [role], handler_guild))
+check('M4: collision keeps existing bob record', 'bob' in users and users['bob'].note == 'BOB NOTE')
+check('M4: collision keeps alice record too', 'alice' in users)
+
+# M2 + happy path: nick change sends announcement, send failure doesn't crash
+whois_bot.UserCommands.write_users_to_file({'carol': whois_bot.User(FakeMember('carol', 'OldN', [role], handler_guild))})
+alert_channel.sent = []
+users = run_member_update(
+    FakeMember('carol', 'OldN', [role], handler_guild),
+    FakeMember('carol', 'NewN', [role], handler_guild))
+check('announcement sent on nick change', len(alert_channel.sent) == 1)
+check('announcement contains new nickname', 'NewN' in alert_channel.sent[0][0])
+check('announcement contains command reminder', '$help' in alert_channel.sent[0][0])
+check('nick persisted', users['carol'].nickname == 'NewN')
+
+broken_guild = FakeGuild(998, 'Broken Server', [FakeBrokenChannel(7, 'voice-chat-sharing')])
+whois_bot.UserCommands.write_users_to_file({'dan': whois_bot.User(FakeMember('dan', 'A', [role], broken_guild))})
+try:
+    run_member_update(
+        FakeMember('dan', 'A', [role], broken_guild),
+        FakeMember('dan', 'B', [role], broken_guild))
+    check('M2: send failure does not crash handler', True)
+except Exception as e:
+    check('M2: send failure does not crash handler', False)
+
+# untracked member: no record change, no announcement
+whois_bot.UserCommands.write_users_to_file({'erin': whois_bot.User(FakeMember('erin', 'E', [role], handler_guild))})
+alert_channel.sent = []
+untracked_role = FakeRole('OtherRole')
+users = run_member_update(
+    FakeMember('frank', 'X', [untracked_role], handler_guild),
+    FakeMember('frank', 'Y', [untracked_role], handler_guild))
+check('untracked nick change: no announcement', alert_channel.sent == [])
+check('untracked nick change: no record added', 'frank' not in users)
 
 print(f'\n{passed} passed, {failed} failed')
 sys.exit(1 if failed else 0)
