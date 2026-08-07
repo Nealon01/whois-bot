@@ -297,5 +297,28 @@ check('prune: empty server lookup preserves store', len(kept) == 3)
 
 whois_bot.UserCommands.load_users_from_server = _orig_load_server
 
+# --- create_nickname_list chunking (Discord 2000-char message limit) ---
+print('create_nickname_list chunking:')
+def _mk_user(name):
+    m = FakeMember(name, name, [role], handler_guild)
+    u = whois_bot.User(m)
+    u.note = 'A deliberately long real name for chunk testing'
+    return u
+
+small = {'a': _mk_user('alpha'), 'b': _mk_user('beta')}
+small_chunks = whois_bot.UserCommands.create_nickname_list(small)
+check('chunking: small list stays one chunk', len(small_chunks) == 1)
+
+big = {f'user{i:02d}': _mk_user(f'user{i:02d}') for i in range(60)}
+big_chunks = whois_bot.UserCommands.create_nickname_list(big)
+check('chunking: big list splits into multiple chunks', len(big_chunks) > 1)
+check('chunking: every chunk under 2000 chars', all(len(c) <= 1900 for c in big_chunks))
+check('chunking: every chunk opens and closes a code block',
+      all(c.startswith('`') and c.endswith('`') for c in big_chunks))
+check('chunking: no user lost across chunks',
+      sum(c.count('<-> ') for c in big_chunks) == len(big))
+check('chunking: lines intact (no mid-line split)',
+      all('<-> ' in c and '\n<->' not in c.replace('\n`', '') for c in big_chunks))
+
 print(f'\n{passed} passed, {failed} failed')
 sys.exit(1 if failed else 0)

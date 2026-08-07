@@ -132,18 +132,33 @@ class UserCommands:
 
     @staticmethod
     def create_nickname_list(users):
-        tmp = '`'
+        """Builds the nickname/note listing.
+
+        Returns a LIST of strings, each under the Discord 2000-char message
+        limit (chunked on line boundaries) so large rosters don't fail to send.
+        """
         max_len = 0
         for user in users.values():
             nick = user.nickname if user.nickname is not None else user.username
             if len(nick) > max_len:
                 max_len = len(nick) + 2
 
+        lines = []
         for user in sorted(users.values()):
             nick = user.nickname if user.nickname is not None else user.username
-            tmp += nick.ljust(max_len) + '<-> ' + user.note + '\n'
+            lines.append(nick.ljust(max_len) + '<-> ' + user.note)
 
-        return tmp + '`'
+        chunks = []
+        current = '`'
+        for line in lines:
+            candidate = current + line + '\n'
+            if len(candidate) + 1 > 1900:  # +1 for the closing backtick
+                chunks.append(current + '`')
+                current = '`' + line + '\n'
+            else:
+                current = candidate
+        chunks.append(current + '`')
+        return chunks
 
     @staticmethod
     def create_user_record(users, username):
@@ -301,8 +316,8 @@ async def on_message(message):
         await message.channel.send(HELP_TEXT)
     if LIST_COMMAND_RE.match(message.content) is not None:
         UserCommands.log(f'Got list request from {message.author.name}')
-        text = UserCommands.create_nickname_list(UserCommands.load_users_from_file())
-        await message.channel.send(text)
+        for chunk in UserCommands.create_nickname_list(UserCommands.load_users_from_file()):
+            await message.channel.send(chunk)
     if USER_COMMAND_RE.match(message.content) is not None:
         UserCommands.log(f'Got user request from {message.author.name}')
         UserCommands.log(message.content)
