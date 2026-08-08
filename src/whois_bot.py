@@ -195,13 +195,12 @@ class UserCommands:
         """
         lines = []
         for user in sorted(users.values()):
-            if user.nickname is not None:
-                if user.note:
-                    lines.append(f"**{user.nickname}** — {user.note} · @{user.username}")
-                else:
-                    lines.append(f"**{user.nickname}** · @{user.username}")
+            # uniform rows: bold display name (nick or username), name, @username
+            display = user.nickname if user.nickname is not None else user.username
+            if user.note:
+                lines.append(f"**{display}** — {user.note} · @{user.username}")
             else:
-                lines.append(f"**{user.username}** — {user.note}" if user.note else f"**{user.username}**")
+                lines.append(f"**{display}** · @{user.username}")
 
         embeds = []
         current = []

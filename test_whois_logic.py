@@ -352,6 +352,15 @@ check('embeds: has title', 'Who' in embeds[0].title)
 check('embeds: note present', 'long real name' in _desc)
 check('embeds: no parens around username', '(beta)' not in _desc)
 
+# user WITHOUT a nickname still shows @username (uniform rows)
+no_nick_users = {'plain': whois_bot.User(FakeMember('plain', None, [role], handler_guild))}
+no_nick_users['plain'].note = 'Plain Person'
+_no_nick_embeds = whois_bot.UserCommands.create_nickname_embeds(no_nick_users)
+_no_nick_desc = _no_nick_embeds[0].description
+check('embeds: no-nick user shows @username', '@plain' in _no_nick_desc)
+check('embeds: no-nick user bold is the username', '**plain**' in _no_nick_desc)
+check('embeds: no-nick row is uniform (has both parts)', '@plain' in _no_nick_desc and 'Plain Person' in _no_nick_desc)
+
 big_embeds = whois_bot.UserCommands.create_nickname_embeds(big)
 check('embeds: big list splits', len(big_embeds) > 1)
 check('embeds: descriptions under 4096', all(len(e.description) <= 4000 for e in big_embeds))
