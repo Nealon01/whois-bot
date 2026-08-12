@@ -1,9 +1,11 @@
 import datetime
+import json
 import os
 import re
 import pickle
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 from dotenv import load_dotenv
@@ -15,17 +17,26 @@ LIST_COMMAND_RE = re.compile(r'^\s*\$list\s*$')
 USER_COMMAND_RE = re.compile(r'^\s*\$user\s.*$')
 NOTE_COMMAND_RE = re.compile(r'^\s*\$note\s.*$')
 NOTE_NAME_COMMAND_RE = re.compile(r'^\s*\$note_name\s.*$')
+SET_CHANNEL_COMMAND_RE = re.compile(r'^\s*\$setchannel\b(.*)$', re.IGNORECASE)
+UNSET_CHANNEL_COMMAND_RE = re.compile(r'^\s*\$unsetchannel\b(.*)$', re.IGNORECASE)
 HELP_TEXT = '\n'.join([
-    'Available commands:',
-    '$help - Shows this list of commands',
-    '$list - list all nicknames/notes',
-    '$user "{nickname/username}" - list specific user\'s nickname/note',
-    '$note "{nickname/username}" "{note}" - Update user note by nickname',
-    '$note_name "{username}" "{note}" - Update user note by username',
+    'Available commands (slash commands, or $ prefix aliases):',
+    '/help - Shows this list of commands',
+    '/list - list all nicknames/notes',
+    '/user "{nickname/username}" - list specific user\'s nickname/note',
+    '/note "{nickname/username}" "{note}" - Update user note by nickname',
+    '/note_name "{username}" "{note}" - Update user note by username',
+    '/setchannel #channel - Set the channel where nickname changes are announced (admins)',
+    '/unsetchannel - Disable nickname change announcements (admins)',
 ])
+# Shown as a footer on every nickname-change announcement.
+COMMAND_REMINDER = 'Commands: `/list` `/user "nick"` `/note "nick" "note"` — `/help` for all'
+# Default announcement channel name used when a server hasn't run $setchannel yet.
+DEFAULT_ALERT_CHANNEL = 'voice-chat-sharing'
 
 intents = discord.Intents.default()
 intents.members = True
+intents.message_content = True
 
 bot = commands.Bot(command_prefix='$', intents=intents)
 
@@ -67,21 +78,41 @@ class UserCommands:
         UserCommands.log('Users Updated: ' + UserCommands.PATH)
 
     @staticmethod
-    def load_users_from_server():
+    async def load_users_from_server_api():
+        """Builds the tracked-user dict from the REST API (authoritative).
+
+        The gateway member cache can be stale/incomplete on startup, which
+        made nickname syncs drift; the REST member list is always current.
+        """
         guild = discord.utils.get(bot.guilds, name=UserCommands.GUILD)
+        if guild is None:
+            UserCommands.log("Guild '" + str(UserCommands.GUILD) + "' not found for server sync")
+            return {}
+        role_ids = {r.name: r.id for r in guild.roles}
+        role_id = role_ids.get(UserCommands.ROLE)
+
+        members = []
+        after = None
+        while True:
+            batch = await bot.http.get_members(guild.id, limit=1000, after=after)
+            members.extend(batch)
+            if len(batch) < 1000:
+                break
+            after = batch[-1]['user']['id']
+
         tmp = {}
-        for member in guild.members:
-            if any(x.name == UserCommands.ROLE for x in member.roles):
-                tmp[member.name] = User(member)
-
-        if not os.path.exists(UserCommands.PATH):
-            UserCommands.write_users_to_file(tmp)
-
+        for m in members:
+            if role_id is None or role_id in m.get('roles', []):
+                u = User.__new__(User)
+                u.username = m['user']['username']
+                u.nickname = m.get('nick')
+                u.note = ''
+                tmp[u.username] = u
         return tmp
 
     @staticmethod
-    def update_nicknames_from_server():
-        server_users = UserCommands.load_users_from_server()
+    async def update_nicknames_from_server():
+        server_users = await UserCommands.load_users_from_server_api()
         file_users = UserCommands.load_users_from_file()
 
         for user in server_users.values():
@@ -89,6 +120,15 @@ class UserCommands:
                 file_users[user.username].nickname = server_users[user.username].nickname
             else:
                 file_users[user.username] = user
+
+        # prune records for users no longer in the tracked role/server.
+        # Guarded: if the server lookup came back empty (transient failure),
+        # don't wipe the store.
+        if server_users:
+            stale = [k for k in file_users if k not in server_users]
+            for k in stale:
+                UserCommands.log("User '" + k + "' removed from tracking (no longer in role)")
+                del file_users[k]
 
         f = open(UserCommands.PATH, 'wb')
         pickle.dump(file_users, f)
@@ -114,29 +154,243 @@ class UserCommands:
 
     @staticmethod
     def create_nickname_list(users):
-        tmp = '`'
+        """Builds the nickname/note listing.
+
+        Returns a LIST of strings, each under the Discord 2000-char message
+        limit (chunked on line boundaries) so large rosters don't fail to send.
+        """
         max_len = 0
+        displays = {}
         for user in users.values():
-            nick = user.nickname if user.nickname is not None else user.username
-            if len(nick) > max_len:
-                max_len = len(nick) + 2
+            if user.nickname is not None:
+                display = f"{user.nickname} ({user.username})"
+            else:
+                display = user.username
+            displays[id(user)] = display
+            if len(display) > max_len:
+                max_len = len(display) + 2
 
+        lines = []
         for user in sorted(users.values()):
-            nick = user.nickname if user.nickname is not None else user.username
-            tmp += nick.ljust(max_len) + '<-> ' + user.note + '\n'
+            lines.append(displays[id(user)].ljust(max_len) + '<-> ' + user.note)
 
-        return tmp + '`'
+        chunks = []
+        current = '`'
+        for line in lines:
+            candidate = current + line + '\n'
+            if len(candidate) + 1 > 1900:  # +1 for the closing backtick
+                chunks.append(current + '`')
+                current = '`' + line + '\n'
+            else:
+                current = candidate
+        chunks.append(current + '`')
+        return chunks
+
+    @staticmethod
+    def create_nickname_embeds(users):
+        """Builds the roster as Discord embeds (mobile-friendly).
+
+        Returns a list of Embeds; each description stays under the 4096-char
+        limit. Lines: **nickname** — note · @username
+        """
+        lines = []
+        for user in sorted(users.values()):
+            # uniform rows: bold display name (nick or username), name, @username
+            display = user.nickname if user.nickname is not None else user.username
+            if user.note:
+                lines.append(f"**{display}** — {user.note} · @{user.username}")
+            else:
+                lines.append(f"**{display}** · @{user.username}")
+
+        embeds = []
+        current = []
+        current_len = 0
+        title = f"Who's Who — {len(users)} tracked"
+        for line in lines:
+            if current and current_len + len(line) + 1 > 4000:
+                embeds.append(discord.Embed(title=title, description='\n'.join(current)))
+                current = [line]
+                current_len = len(line)
+            else:
+                current.append(line)
+                current_len += len(line) + 1
+        if current:
+            embeds.append(discord.Embed(title=title, description='\n'.join(current)))
+        return embeds
 
     @staticmethod
     def create_user_record(users, username):
         user = users[username]
-        nick = user.nickname if user.nickname is not None else user.username
-        return 'Nickname:\t' + nick + '\t- Note:\t' + user.note + '\n'
+        nick = user.nickname if user.nickname is not None else '(none)'
+        return 'Username:\t' + user.username + '\nNickname:\t' + nick + '\nNote:\t' + user.note + '\n'
 
     @staticmethod
     def log(message):
         """ Logs a message. """
         print(f'[WhoIs Bot] [{datetime.datetime.now()}]: {message}')
+
+
+def build_nickname_update_text(before_nick, after_nick, username, mention):
+    """ Builds the announcement text for a nickname change. Pure function, testable. """
+    old_disp = before_nick if before_nick is not None else username
+    new_disp = after_nick if after_nick is not None else username
+    if before_nick is None:
+        action = 'set their nickname to'
+    elif after_nick is None:
+        action = 'removed their nickname'
+    else:
+        action = 'changed their nickname'
+    return (
+        f'🔔 **{mention}** {action}\n'
+        f'`{old_disp}` → `{new_disp}`\n'
+        f'📋 {COMMAND_REMINDER}'
+    )
+
+
+class GuildConfig:
+    """ Per-guild settings (currently: the nickname-change announcement channel), stored in JSON. """
+    CONFIG_PATH = ''
+
+    @staticmethod
+    def initialize(path):
+        GuildConfig.CONFIG_PATH = path
+
+    @staticmethod
+    def load():
+        if not GuildConfig.CONFIG_PATH or not os.path.exists(GuildConfig.CONFIG_PATH):
+            return {}
+        try:
+            with open(GuildConfig.CONFIG_PATH, 'r') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            UserCommands.log('Failed to read config ' + GuildConfig.CONFIG_PATH + ': ' + str(e))
+            return {}
+
+    @staticmethod
+    def save(config):
+        try:
+            # atomic-ish write: temp file + replace, so a crash can't corrupt the config
+            tmp_path = GuildConfig.CONFIG_PATH + '.tmp'
+            with open(tmp_path, 'w') as f:
+                json.dump(config, f, indent=2)
+            os.replace(tmp_path, GuildConfig.CONFIG_PATH)
+            UserCommands.log('Config saved: ' + GuildConfig.CONFIG_PATH)
+            return True
+        except OSError as e:
+            UserCommands.log('Failed to write config ' + GuildConfig.CONFIG_PATH + ': ' + str(e))
+            return False
+
+    @staticmethod
+    def get_announcement_channel(guild):
+        """ Resolves the channel to announce nickname changes in.
+
+        Priority: 1) channel set via $setchannel for this guild, 2) a channel named
+        DEFAULT_ALERT_CHANNEL (case-insensitive), 3) None (announcements disabled).
+        """
+        config = GuildConfig.load()
+        channel_id = config.get(str(guild.id))
+        if channel_id:
+            channel = guild.get_channel(channel_id)
+            if channel is not None and hasattr(channel, 'send'):
+                return channel
+            UserCommands.log(f"Configured channel {channel_id} not found/usable in guild '{guild.name}', falling back.")
+        for channel in guild.text_channels:
+            if DEFAULT_ALERT_CHANNEL in channel.name.lower():
+                UserCommands.log(f"Auto-detected '{channel.name}' for guild '{guild.name}' (run $setchannel to change it).")
+                return channel
+        UserCommands.log(f"No announcement channel for guild '{guild.name}' — run $setchannel #channel to enable alerts.")
+        return None
+
+
+# --- Slash commands (primary interface; $ prefix aliases still work) ---
+
+@bot.tree.command(name='help', description='Shows this list of commands')
+async def slash_help(interaction: discord.Interaction):
+    await interaction.response.send_message(HELP_TEXT)
+
+
+@bot.tree.command(name='list', description='List all nicknames/notes')
+async def slash_list(interaction: discord.Interaction):
+    UserCommands.log(f'Got list request from {interaction.user.name}')
+    users = UserCommands.load_users_from_file()
+    if not users:
+        await interaction.response.send_message('No users tracked yet.')
+        return
+    embeds = UserCommands.create_nickname_embeds(users)
+    await interaction.response.send_message(embed=embeds[0])
+    for embed in embeds[1:]:
+        await interaction.followup.send(embed=embed)
+
+
+@bot.tree.command(name='user', description="Shows the record for a specific user")
+@app_commands.describe(nickname='Nickname or username')
+async def slash_user(interaction: discord.Interaction, nickname: str):
+    users = UserCommands.load_users_from_file()
+    username = UserCommands.get_username_from_nickname(users, nickname)
+    if username != '':
+        await interaction.response.send_message(UserCommands.create_user_record(users, username))
+    else:
+        await interaction.response.send_message("Cannot find username/nickname '" + nickname + "'")
+
+
+@bot.tree.command(name='note', description='Update user note by nickname')
+@app_commands.describe(nickname='Nickname or username', note='The note to save')
+async def slash_note(interaction: discord.Interaction, nickname: str, note: str):
+    users = UserCommands.load_users_from_file()
+    username = UserCommands.get_username_from_nickname(users, nickname)
+    if username != '':
+        UserCommands.log('Updating note for \'' + nickname + '\' to \'' + note + '\'')
+        users[username].note = note
+        UserCommands.write_users_to_file(users)
+        await interaction.response.send_message(UserCommands.create_user_record(users, username))
+    else:
+        await interaction.response.send_message("Cannot find username/nickname '" + nickname + "'")
+
+
+@bot.tree.command(name='note_name', description='Update user note by username')
+@app_commands.describe(username='Discord username', note='The note to save')
+async def slash_note_name(interaction: discord.Interaction, username: str, note: str):
+    users = UserCommands.load_users_from_file()
+    if username in users:
+        UserCommands.log('Updating note for \'' + username + '\' to \'' + note + '\'')
+        users[username].note = note
+        UserCommands.write_users_to_file(users)
+        await interaction.response.send_message(UserCommands.create_user_record(users, username))
+    else:
+        await interaction.response.send_message("Cannot find username '" + username + "'")
+
+
+@bot.tree.command(name='setchannel', description='Set the channel where nickname changes are announced')
+@app_commands.describe(channel='Text channel for announcements')
+@app_commands.guild_only()
+async def slash_setchannel(interaction: discord.Interaction, channel: discord.TextChannel):
+    if not (interaction.user.guild_permissions.manage_guild
+            or interaction.user.guild_permissions.administrator):
+        await interaction.response.send_message("You need 'Manage Server' permission to change the alert channel.")
+        return
+    config = GuildConfig.load()
+    config[str(interaction.guild.id)] = channel.id
+    if GuildConfig.save(config):
+        await interaction.response.send_message('✅ Nickname change alerts will be posted to #' + channel.name)
+    else:
+        await interaction.response.send_message("❌ Couldn't save the config file — alert channel NOT changed.")
+
+
+@bot.tree.command(name='unsetchannel', description='Disable nickname change announcements')
+@app_commands.guild_only()
+async def slash_unsetchannel(interaction: discord.Interaction):
+    if not (interaction.user.guild_permissions.manage_guild
+            or interaction.user.guild_permissions.administrator):
+        await interaction.response.send_message("You need 'Manage Server' permission to change the alert channel.")
+        return
+    config = GuildConfig.load()
+    if config.pop(str(interaction.guild.id), None) is not None:
+        if GuildConfig.save(config):
+            await interaction.response.send_message('Nickname change alerts disabled for this server.')
+        else:
+            await interaction.response.send_message("❌ Couldn't save the config file — alerts NOT disabled.")
+    else:
+        await interaction.response.send_message('No alert channel was configured for this server.')
 
 
 @bot.event
@@ -147,24 +401,74 @@ async def on_ready():
         name='you',
         type=discord.ActivityType.watching)
     await bot.change_presence(activity=activity)
-    UserCommands.update_nicknames_from_server()
+    await UserCommands.update_nicknames_from_server()
+    try:
+        guild = discord.utils.get(bot.guilds, name=UserCommands.GUILD)
+        if guild is not None:
+            # guild-scoped only: shows instantly and avoids the duplicate
+            # global+guild entries that confuse Discord clients
+            bot.tree.copy_global_to(guild=guild)
+            synced_guild = await bot.tree.sync(guild=guild)
+            UserCommands.log(f"Synced {len(synced_guild)} slash command(s) for guild '{guild.name}'")
+            # remove any previously-synced global commands (they show as duplicates)
+            await bot.tree._http.bulk_upsert_global_commands(bot.application_id, payload=[])
+            UserCommands.log('Cleared global command scope (guild-scoped only)')
+        else:
+            synced = await bot.tree.sync()
+            UserCommands.log(f"Synced {len(synced)} global slash command(s)")
+    except Exception as e:
+        UserCommands.log('Failed to sync slash commands: ' + str(e))
+
+
+@bot.tree.error
+async def on_tree_error(interaction: discord.Interaction, error: Exception):
+    """Makes interaction failures visible in the bot logs instead of silent."""
+    UserCommands.log(f"Slash command error from {getattr(interaction.user, 'name', '?')}: {error}")
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send('Something went wrong — the error has been logged.')
+        else:
+            await interaction.response.send_message('Something went wrong — the error has been logged.')
+    except Exception:
+        pass
 
 
 @bot.event
 async def on_member_update(before, after):
-    """Called when a member has been updates (nickname change)"""
+    """Called when a member has been updated (nickname or role change)"""
     users = UserCommands.load_users_from_file()
     UserCommands.log("before: '" + before.name + "'. After: " + after.name)
     # if user has tracked role
     if any(x.name == UserCommands.ROLE for x in after.roles):
+        if before.name != after.name and before.name in users:
+            # global username changed: migrate the stored record to the new key
+            if after.name in users:
+                # collision — another record already owns the new username; don't destroy it
+                UserCommands.log("Username change '" + before.name + "' -> '" + after.name
+                                 + "' collides with an existing record; keeping existing.")
+            else:
+                users[after.name] = users.pop(before.name)
+                users[after.name].username = after.name
+                UserCommands.log("Username changed: '" + before.name + "' -> '" + after.name + "' (record migrated)")
+                UserCommands.write_users_to_file(users)
+
         if after.name in users:
             if after.nick == before.nick:
                 pass # unimportant change to already tracked user
             else:
                 # new nickname on existing user
-                UserCommands.log("User '" + before.name + "' updated nickname to '" + before.nick + "'")
+                UserCommands.log("User '" + before.name + "' updated nickname to '" + str(after.nick) + "'")
                 users[after.name].nickname = after.nick
                 UserCommands.write_users_to_file(users)
+                # announce the change to the server's configured channel
+                channel = GuildConfig.get_announcement_channel(after.guild)
+                if channel is not None:
+                    try:
+                        await channel.send(build_nickname_update_text(
+                            before.nick, after.nick, after.name, after.mention))
+                    except Exception as e:
+                        # never let a send failure (Forbidden, HTTP, etc.) crash the handler
+                        UserCommands.log('Failed to announce nickname change: ' + str(e))
         else:
             # new user added
             UserCommands.log("User '" + after.name + "' added to tracking")
@@ -190,8 +494,12 @@ async def on_message(message):
         await message.channel.send(HELP_TEXT)
     if LIST_COMMAND_RE.match(message.content) is not None:
         UserCommands.log(f'Got list request from {message.author.name}')
-        text = UserCommands.create_nickname_list(UserCommands.load_users_from_file())
-        await message.channel.send(text)
+        users = UserCommands.load_users_from_file()
+        if not users:
+            await message.channel.send('No users tracked yet.')
+        else:
+            for embed in UserCommands.create_nickname_embeds(users):
+                await message.channel.send(embed=embed)
     if USER_COMMAND_RE.match(message.content) is not None:
         UserCommands.log(f'Got user request from {message.author.name}')
         UserCommands.log(message.content)
@@ -233,10 +541,76 @@ async def on_message(message):
             await message.channel.send("Must be 2 args")
         else:
             users = UserCommands.load_users_from_file()
-            UserCommands.log('Updating note for \'' + args[0] + '\' to \'' + args[1] + '\'')
-            users[args[0]].note = args[1]
-            UserCommands.write_users_to_file(users)
+            if args[0] in users:
+                UserCommands.log('Updating note for \'' + args[0] + '\' to \'' + args[1] + '\'')
+                users[args[0]].note = args[1]
+                UserCommands.write_users_to_file(users)
+                await message.channel.send(UserCommands.create_user_record(users, args[0]))
+            else:
+                await message.channel.send("Cannot find username '" + args[0] + "'")
+
+    elif SET_CHANNEL_COMMAND_RE.match(message.content) is not None:
+        UserCommands.log(f'Got setchannel request from {message.author.name}')
+        if message.guild is None:
+            return  # DM — nothing to configure
+        if not (message.author.guild_permissions.manage_guild
+                or message.author.guild_permissions.administrator):
+            await message.channel.send("You need 'Manage Server' permission to change the alert channel.")
+        else:
+            set_channel_match = SET_CHANNEL_COMMAND_RE.match(message.content)
+            target = set_channel_match.group(1).strip() if set_channel_match else ''
+            if not target:
+                await message.channel.send('Usage: `$setchannel #channel` (or `$setchannel channel-name`)')
+            else:
+                channel = None
+                match = re.search(r'<#(\d+)>', target)
+                if match:
+                    channel = message.guild.get_channel(int(match.group(1)))
+                if channel is None:
+                    # exact name match first, then substring (handles emoji-prefixed names)
+                    for c in message.guild.text_channels:
+                        if c.name.lower() == target.lower():
+                            channel = c
+                            break
+                if channel is None:
+                    for c in message.guild.text_channels:
+                        if target.lower() in c.name.lower():
+                            channel = c
+                            break
+                if channel is None or not hasattr(channel, 'send'):
+                    await message.channel.send("Couldn't find a text channel named `" + target + "`")
+                else:
+                    config = GuildConfig.load()
+                    config[str(message.guild.id)] = channel.id
+                    if GuildConfig.save(config):
+                        await message.channel.send('✅ Nickname change alerts will be posted to #' + channel.name)
+                    else:
+                        await message.channel.send("❌ Couldn't save the config file — alert channel NOT changed.")
+    elif UNSET_CHANNEL_COMMAND_RE.match(message.content) is not None:
+        UserCommands.log(f'Got unsetchannel request from {message.author.name}')
+        if message.guild is None:
+            return  # DM — nothing to configure
+        unset_channel_match = UNSET_CHANNEL_COMMAND_RE.match(message.content)
+        if unset_channel_match and unset_channel_match.group(1).strip():
+            await message.channel.send('Usage: `$unsetchannel` (takes no arguments)')
+            return
+        if not (message.author.guild_permissions.manage_guild
+                or message.author.guild_permissions.administrator):
+            await message.channel.send("You need 'Manage Server' permission to change the alert channel.")
+        else:
+            config = GuildConfig.load()
+            if config.pop(str(message.guild.id), None) is not None:
+                if GuildConfig.save(config):
+                    await message.channel.send('Nickname change alerts disabled for this server.')
+                else:
+                    await message.channel.send("❌ Couldn't save the config file — alerts NOT disabled.")
+            else:
+                await message.channel.send('No alert channel was configured for this server.')
 
 
-UserCommands.initialize(os.getenv('DISCORD_GUILD'), os.getenv('DICT_PATH'), os.getenv('DISCORD_ROLE'))
-bot.run(os.getenv('DISCORD_TOKEN'))
+if __name__ == '__main__':
+    UserCommands.initialize(os.getenv('DISCORD_GUILD'), os.getenv('DICT_PATH'), os.getenv('DISCORD_ROLE'))
+    config_path = os.getenv('CONFIG_PATH') or os.path.join(
+        os.path.dirname(os.getenv('DICT_PATH') or '.'), 'guild_config.json')
+    GuildConfig.initialize(config_path)
+    bot.run(os.getenv('DISCORD_TOKEN'))
